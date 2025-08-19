@@ -24,6 +24,7 @@ local savedDBDefaults = {
 		defaultMatCostMethod = "min(dbmarket, crafting, vendorbuy, convert(dbmarket))",
 		defaultCraftPriceMethod = "dbminbuyout",
 		priceColumn = 1,
+		profitColumnMode = 1, -- 1 = percent, 2 = raw value when Profit column active
 		ignoreCDCraftCost = true,
 		neverCraftInks = true,
 		frameQueueOpen = nil,

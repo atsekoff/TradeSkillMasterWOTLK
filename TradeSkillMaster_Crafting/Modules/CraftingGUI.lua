@@ -1151,17 +1151,55 @@ function GUI:CreateProfessionsTab(parent)
 			return L["Item Value"]
 		elseif TSM.db.global.priceColumn == 3 then
 			return L["Profit"]
+		elseif TSM.db.global.priceColumn == 4 then
+			return L["Vendor Value"]
+		end
+	end
+
+	local function GetProfitColumnHeader()
+		if TSM.db.global.priceColumn == 2 then
+			-- Item Value (AH) view
+			if TSM.db.global.profitColumnMode == 2 then
+				return L["AH Profit"]
+			else
+				return L["AH %"]
+			end
+		elseif TSM.db.global.priceColumn == 3 then
+			-- Profit view (always show percent to avoid duplication with left column)
+			return L["Profit %"]
+		elseif TSM.db.global.priceColumn == 4 then
+			if TSM.db.global.profitColumnMode == 2 then
+				return L["Vend Profit"]
+			else
+				return L["Vend %"]
+			end
+		else
+			return "P. %"
 		end
 	end
 
 	local function OnSTColumnClick(self)
 		if self.colNum == 2 then
 			TSM.db.global.priceColumn = TSM.db.global.priceColumn + 1
-			TSM.db.global.priceColumn = TSM.db.global.priceColumn > 3 and 1 or TSM.db.global.priceColumn
+			TSM.db.global.priceColumn = TSM.db.global.priceColumn > 4 and 1 or TSM.db.global.priceColumn
 			self:SetText(GetPriceColumnText())
 			wipe(priceTextCache)
 			priceTextCache.lastClear = time()
+			if TSM.db.global.priceColumn ~= 3 then
+				TSM.db.global.profitColumnMode = 1
+			end
+			-- update third column header (use scrolling table headCols)
+			if self.st and self.st.headCols and self.st.headCols[3] then
+				self.st.headCols[3]:SetText(GetProfitColumnHeader())
+			end
 			GUI:UpdateProfessionsTabST()
+		elseif self.colNum == 3 then
+			-- Toggle only for Item Value (2) and Vendor Value (4) modes
+			if TSM.db.global.priceColumn == 2 or TSM.db.global.priceColumn == 4 then
+				TSM.db.global.profitColumnMode = (TSM.db.global.profitColumnMode == 1) and 2 or 1
+				self:SetText(GetProfitColumnHeader())
+				GUI:UpdateProfessionsTabST()
+			end
 		end
 	end
 
@@ -1172,11 +1210,9 @@ function GUI:CreateProfessionsTab(parent)
 	TSMAPI.Design:SetFrameColor(stContainer)
 
 	local stCols = {
-		-- { name = L["Name"], width = 0.725, align = "LEFT" },
-		-- { name = GetPriceColumnText(), width = 0.275, align = "LEFT" },
 		{ name = L["Name"], width = 0.7, align = "LEFT" },
 		{ name = GetPriceColumnText(), width = 0.2, align = "LEFT" },
-		{ name = "P. %", width = 0.1, align = "LEFT" }
+		{ name = GetProfitColumnHeader(), width = 0.1, align = "LEFT" }
 	}
 	frame.st = TSMAPI:CreateScrollingTable(stContainer, stCols, { OnClick = OnSTRowClick, OnColumnClick = OnSTColumnClick })
 
@@ -1649,7 +1685,8 @@ function GUI:UpdateProfessionsTabST()
 			end
 
 			local priceText = priceTextCache[spellID]
-			local cost, buyout, profit = TSM.Cost:GetCraftPrices(spellID)		
+			local cost, buyout, ahProfit = TSM.Cost:GetCraftPrices(spellID) -- ahProfit already accounts for configured deduction
+			local vendorPrice, vendorProfit
 			if spellID and not priceText then
 				--local cost, buyout, profit = TSM.Cost:GetCraftPrices(spellID)
 						
@@ -1657,24 +1694,32 @@ function GUI:UpdateProfessionsTabST()
 					if cost and cost > 0 then
 						priceText = TSMAPI:FormatTextMoney(cost, TSMAPI.Design:GetInlineColor("link"))
 					end
-				elseif TSM.db.global.priceColumn == 2 then -- Item Value
+				elseif TSM.db.global.priceColumn == 2 then -- Item Value (AH value)
 					if buyout and buyout > 0 then
 						priceText = TSMAPI:FormatTextMoney(buyout, TSMAPI.Design:GetInlineColor("link"))
 					end
-				elseif TSM.db.global.priceColumn == 3 then -- Profit
-					if profit then				
-						-- if profit < 0 then
-							-- priceText = "|cffff0000-|r" .. TSMAPI:FormatTextMoney(-profit, "|cffff0000") .. format(" (%s%.0f%%|r)", "|cffff0000", profitPercent)
-						-- else
-							-- priceText = TSMAPI:FormatTextMoney(profit, "|cff00ff00") .. format(" (%s%.0f%%|r)", "|cff00ff00", profitPercent)
-						-- end
-						if profit < 0 then
-							priceText = "|cffff0000-|r" .. TSMAPI:FormatTextMoney(-profit, "|cffff0000")
+				elseif TSM.db.global.priceColumn == 3 then -- Profit (raw AH profit)
+					if ahProfit then
+						if ahProfit < 0 then
+							priceText = "|cffff0000-|r" .. TSMAPI:FormatTextMoney(-ahProfit, "|cffff0000")
 						else
-							priceText = TSMAPI:FormatTextMoney(profit, "|cff00ff00")
+							priceText = TSMAPI:FormatTextMoney(ahProfit, "|cff00ff00")
 						end
 					end
-				end	
+				elseif TSM.db.global.priceColumn == 4 then -- Vendor Value
+					if spellID and TSM.db.factionrealm.crafts[spellID] then
+						local resultItem = TSM.db.factionrealm.crafts[spellID].itemID
+						if resultItem then
+							vendorPrice = select(11, TSMAPI:GetSafeItemInfo(resultItem))
+						end
+					end
+					if vendorPrice and vendorPrice > 0 then
+						priceText = TSMAPI:FormatTextMoney(vendorPrice, TSMAPI.Design:GetInlineColor("link"))
+						if cost and cost > 0 then
+							vendorProfit = vendorPrice - cost
+						end
+					end
+				end
 					
 				if priceText then
 					priceTextCache[spellID] = priceText
@@ -1682,15 +1727,49 @@ function GUI:UpdateProfessionsTabST()
 					priceText = "---"
 				end
 			end
+
+			-- Ensure vendor profit gets (re)calculated even when priceText was cached
+			if TSM.db.global.priceColumn == 4 and spellID and (vendorProfit == nil) then
+				if TSM.db.factionrealm.crafts[spellID] then
+					local resultItem = TSM.db.factionrealm.crafts[spellID].itemID
+					if resultItem then
+						vendorPrice = select(11, TSMAPI:GetSafeItemInfo(resultItem))
+						if vendorPrice and vendorPrice > 0 and cost and cost > 0 then
+							vendorProfit = vendorPrice - cost
+						end
+					end
+				end
+			end
 			
-			local profitPercent = "---"		
-			if profit then
-				profitPercent = profit / cost * 100	
-				if profit < 0 then
-					profitPercent = format("%s%.0f%%|r", "|cffff0000", profitPercent)
+			local profitDisplay = "---"
+			-- Decide which profit basis to use for display depending on mode
+			local basisProfit
+			if TSM.db.global.priceColumn == 2 then
+				basisProfit = (cost and ahProfit) and ahProfit or nil
+			elseif TSM.db.global.priceColumn == 3 then
+				basisProfit = (cost and ahProfit) and ahProfit or nil
+			elseif TSM.db.global.priceColumn == 4 then
+				basisProfit = (cost and vendorProfit) and vendorProfit or nil
+			elseif TSM.db.global.priceColumn == 1 then
+				basisProfit = (cost and ahProfit) and ahProfit or nil
+			end
+
+			if basisProfit and cost and cost > 0 then
+				local showRaw = (TSM.db.global.priceColumn == 2 or TSM.db.global.priceColumn == 4) and TSM.db.global.profitColumnMode == 2
+				if showRaw then
+					if basisProfit < 0 then
+						profitDisplay = "|cffff0000-|r" .. TSMAPI:FormatTextMoney(-basisProfit, "|cffff0000")
+					else
+						profitDisplay = TSMAPI:FormatTextMoney(basisProfit, "|cff00ff00")
+					end
 				else
-					profitPercent = format("%s%.0f%%|r", "|cff00ff00", profitPercent)
-				end		
+					local pct = basisProfit / cost * 100
+					if basisProfit < 0 then
+						profitDisplay = format("%s%.0f%%|r", "|cffff0000", pct)
+					else
+						profitDisplay = format("%s%.0f%%|r", "|cff00ff00", pct)
+					end
+				end
 			end
 			
 			local row = {
@@ -1702,7 +1781,7 @@ function GUI:UpdateProfessionsTabST()
 						value = spellID and priceText or "",
 					},
 					{
-						value = spellID and profitPercent or "",
+						value = spellID and profitDisplay or "",
 					},
 				},
 				index = i,
