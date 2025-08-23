@@ -49,6 +49,7 @@ TSM.designDefaults = {
 		category2 = { 85, 180, 8, 1 },
 		tooltip = { 130, 130, 250, 1 },
 		advanced = { 255, 30, 0, 1 },
+		inactive = { 150, 148, 140, 1 }, -- added for deposit display / generic muted text
 	},
 	edgeSize = 1.5,
 	fonts = {

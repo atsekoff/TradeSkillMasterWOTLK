@@ -192,17 +192,36 @@ function private:DoPost(postInfo)
 		-- Fix in case Blizzard_AuctionUI hasn't set this value yet (which could cause an error)
 		AuctionFrameAuctions.duration = postInfo.duration
 	end
-	
-	local bag, slot
-	for b, s, itemString in TSMAPI:GetBagIterator() do
-		if postInfo.itemString == itemString then
-			bag, slot = b, s
-			break
+
+	-- Ensure sell slot has our item; if already there, skip pickup.
+	local sellName = GetAuctionSellItemInfo()
+	local desiredName = select(1, TSMAPI:GetSafeItemInfo(postInfo.itemString))
+	if sellName ~= desiredName then
+		-- Clear cursor if something is held to avoid swapping mishaps.
+		if CursorHasItem() then ClearCursor() end
+		local bag, slot
+		for b, s, itemString in TSMAPI:GetBagIterator() do
+			if postInfo.itemString == itemString then
+				bag, slot = b, s
+				break
+			end
 		end
+		if not bag then
+			TSM:Print(L["Item not found in bags. Skipping"])
+			return
+		end
+		PickupContainerItem(bag, slot)
+		ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+		-- If still on cursor (shouldn't be), clear it.
+		if CursorHasItem() then ClearCursor() end
 	end
-	if not bag then
-		TSM:Print(L["Item not found in bags. Skipping"])
-		return
+
+	-- Set stack size / number of auctions entries to user's selections to ensure correctness.
+	if AuctionsStackSizeEntry and AuctionsStackSizeEntry:GetNumber() ~= postInfo.stackSize then
+		AuctionsStackSizeEntry:SetNumber(postInfo.stackSize)
+	end
+	if AuctionsNumStacksEntry and AuctionsNumStacksEntry:GetNumber() ~= postInfo.numAuctions then
+		AuctionsNumStacksEntry:SetNumber(postInfo.numAuctions)
 	end
 	
 	local function OnPost()
@@ -214,8 +233,8 @@ function private:DoPost(postInfo)
 	private:RegisterMessage("TSM_AH_EVENTS", OnPost)
 	TSMAPI:WaitForAuctionEvents("Post", postInfo.numAuctions > 1)
 
-	PickupContainerItem(bag, slot)
-	ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+	-- Final safety: clear cursor before starting auction.
+	if CursorHasItem() then ClearCursor() end
 	StartAuction(postInfo.bid, postInfo.buyout, postInfo.duration, postInfo.stackSize, postInfo.numAuctions)
 end
 
@@ -422,6 +441,9 @@ function private:UpdatePostFrame()
 	local stackSize = min(private.currentAuction.count, numInBags)
 	local currentPerItem = floor(private.currentAuction.buyout/private.currentAuction.count)
 	local currentBuyout = stackSize == private.currentAuction.count and private.currentAuction.buyout or (currentPerItem*stackSize)
+
+	-- clear any previous vendor price cache (we now rely solely on Blizzard's deposit calculation)
+	private.postFrame.vendorPrice = nil
 	
 	private.postFrame.numInBags = numInBags
 	private.postFrame.linkText:SetText(private.currentAuction.link)
@@ -435,6 +457,11 @@ function private:UpdatePostFrame()
 	private.postFrame.stackSizeInputBox.btn:SetText(format(L["max %d"], private.postFrame.stackSizeInputBox.max))
 	private.postFrame.stackSizeInputBox:SetNumber(stackSize)
 	private.postFrame.durationDropdown:SetValue(TSM.db.profile.postDuration)
+
+	-- initial deposit update
+	if private.postFrame.UpdateDeposit then
+		private.postFrame:UpdateDeposit()
+	end
 end
 
 
@@ -461,6 +488,8 @@ function private:CreateConfirmationFrame(parent)
 				TSMAPI.AuctionControl:HideConfirmation()
 			end
 		end)
+	-- NOTE: We intentionally do NOT clear the Blizzard sell slot here since the confirmation
+	-- frame never places items there (only the post frame does for deposit calculations).
 	
 	local bg = CreateFrame("Frame", nil, frame)
 	bg:SetFrameStrata("HIGH")
@@ -539,7 +568,7 @@ function private:CreatePostFrame(parent)
 	frame:SetPoint("CENTER")
 	frame:SetFrameStrata("DIALOG")
 	frame:SetWidth(250)
-	frame:SetHeight(245)
+	frame:SetHeight(265) -- slightly taller to fit deposit display
 	frame.UpdateStrata = function()
 		frame:SetFrameStrata("DIALOG")
 		frame.bg:SetFrameStrata("HIGH")
@@ -550,6 +579,19 @@ function private:CreatePostFrame(parent)
 				TSMAPI.AuctionControl:HideConfirmation()
 			end
 		end)
+	-- Helper to clear the Blizzard auction sell slot safely.
+	local function ClearAuctionSellSlot()
+		local sellName = GetAuctionSellItemInfo()
+		if sellName then
+			ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+			if CursorHasItem() then ClearCursor() end
+		end
+	end
+	-- Clear any item from the Blizzard sell slot when this TSM Post frame hides.
+	frame:SetScript("OnHide", function()
+		-- Slight delay so any in-flight deposit timers finish before we clear.
+		TSMAPI:CreateTimeDelay("tsm_postframe_clear_"..tostring(frame), 0.01, ClearAuctionSellSlot)
+	end)
 	
 	local bg = CreateFrame("Frame", nil, frame)
 	bg:SetFrameStrata("HIGH")
@@ -579,13 +621,18 @@ function private:CreatePostFrame(parent)
 			private:DoPost(postInfo)
 		end)
 	frame.proceed = btn
-	
+
+	-- (ClearAuctionSellSlot declared earlier in this function.)
+
 	local btn = TSMAPI.GUI:CreateButton(frame, 18)
 	btn:SetPoint("BOTTOMLEFT", frame, "BOTTOM", 2, 10)
 	btn:SetPoint("BOTTOMRIGHT", -10, 10)
 	btn:SetHeight(25)
 	btn:SetText(CLOSE)
-	btn:SetScript("OnClick", function() frame:Hide() end)
+	btn:SetScript("OnClick", function()
+		ClearAuctionSellSlot()
+		frame:Hide()
+	end)
 	frame.close = btn
 	
 	local linkText = TSMAPI.GUI:CreateLabel(frame)
@@ -771,8 +818,170 @@ function private:CreatePostFrame(parent)
 	durationDropdown:SetPoint("TOPLEFT", durationLabel, "TOPRIGHT", 10, 0)
 	durationDropdown:SetPoint("TOPRIGHT", 0, -165)
 	durationDropdown:SetHeight(20)
-	durationDropdown:SetCallback("OnValueChanged", function(self, _, value) TSM.db.profile.postDuration = value end)
+	durationDropdown:SetCallback("OnValueChanged", function(self, _, value)
+		TSM.db.profile.postDuration = value
+		if frame.UpdateDeposit then frame:UpdateDeposit() end
+	end)
 	frame.durationDropdown = durationDropdown
+
+	-- Deposit label
+	local depositLabel = TSMAPI.GUI:CreateLabel(frame)
+	depositLabel:SetPoint("TOPLEFT", 10, -190)
+	depositLabel:SetHeight(20)
+	depositLabel:SetJustifyH("LEFT")
+	depositLabel:SetText("")
+	frame.depositLabel = depositLabel
+
+	-- Function to compute and update deposit cost display
+	frame.UpdateDeposit = function(self, force)
+		if not private.currentAuction or not private.currentAuction.itemString then
+			self.depositLabel:SetText(format("%s %s", L["Deposit:"], TSMAPI.Design:GetInlineColor("inactive").."---|r"))
+			return
+		end
+		local stackSize = self.stackSizeInputBox:GetNumber()
+		local numAuctions = self.numAuctionsInputBox:GetNumber()
+		local durationIndex = TSM.db.profile.postDuration or 1
+		if stackSize <= 0 or numAuctions <= 0 then
+			self.depositLabel:SetText(format("%s %s", L["Deposit:"], TSMAPI.Design:GetInlineColor("inactive").."---|r"))
+			return
+		end
+
+		-- Guard against re-entrancy / user dragging something.
+		if self._depositBuilding then return end
+		if CursorHasItem() and not force then
+			-- Defer until cursor cleared.
+			TSMAPI:CreateTimeDelay("tsm_deposit_cursor_wait", 0.05, function()
+				if frame:IsVisible() then frame:UpdateDeposit(false) end
+			end)
+			return
+		end
+
+		self._depositBuilding = true
+		local desiredName = select(1, TSMAPI:GetSafeItemInfo(private.currentAuction.itemString))
+		local sellName, _, sellCount = GetAuctionSellItemInfo()
+
+		-- 1. Place item if empty or different item.
+		if force or (not sellName) or (sellName ~= desiredName) then
+			if CursorHasItem() then ClearCursor() end
+			for b, s, itemString, q in TSMAPI:GetBagIterator() do
+				if itemString == private.currentAuction.itemString then
+					PickupContainerItem(b, s)
+					ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+					break
+				end
+			end
+			sellName, _, sellCount = GetAuctionSellItemInfo()
+		end
+
+		-- 2. Top-up only the difference (no rebuilding) if we need more for chosen stack size.
+		if sellName == desiredName and sellCount and sellCount < stackSize then
+			local need = stackSize - sellCount
+			for b, s, itemString, q in TSMAPI:GetBagIterator() do
+				if need <= 0 then break end
+				if itemString == private.currentAuction.itemString then
+					local take = min(q, need)
+					if take < q then
+						SplitContainerItem(b, s, take)
+					else
+						PickupContainerItem(b, s)
+					end
+					ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+					need = need - take
+				end
+			end
+			-- Re-read count (in case not enough to satisfy, still proceed for lower actual count deposit)
+			sellName, _, sellCount = GetAuctionSellItemInfo()
+		end
+
+		-- 3. Cursor safety
+		if CursorHasItem() then
+			local tmpName = GetAuctionSellItemInfo()
+			if not tmpName then
+				ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+			end
+			if CursorHasItem() then ClearCursor() end
+		end
+
+		self._depositBuilding = false
+		-- Set desired stack size in Blizzard's stack size entry if possible (this drives CalculateAuctionDeposit per-stack size).
+		if AuctionsStackSizeEntry and AuctionsStackSizeEntry:GetNumber() ~= stackSize then
+			AuctionsStackSizeEntry:SetNumber(stackSize)
+		end
+		-- We don't care about num stacks entry for per-stack deposit; just leave it or set to 1.
+		if AuctionsNumStacksEntry and AuctionsNumStacksEntry:GetNumber() ~= 1 then
+			AuctionsNumStacksEntry:SetNumber(1)
+		end
+
+		-- Final cursor safety: if an item is still on the cursor try to drop it into the sell slot (if empty) or clear.
+		if CursorHasItem() then
+			local sellNameCheck = GetAuctionSellItemInfo()
+			if not sellNameCheck then
+				ClickAuctionSellItemButton(AuctionsItemButton, "LeftButton")
+			end
+			if CursorHasItem() then
+				ClearCursor()
+			end
+		end
+
+		-- Defer the actual API read slightly to allow Blizzard to update deposit.
+		self.depositLabel:SetText(format("%s %s", L["Deposit:"], TSMAPI.Design:GetInlineColor("inactive")..L["Calculating..."].."|r"))
+		self._depositAttempts = 0
+		local timerBase = "tsm_deposit_calc_"..tostring(frame)
+		local function TryFetch()
+			if not frame:IsVisible() then return end
+			self._depositAttempts = self._depositAttempts + 1
+			local sellName2, _, sellCount2 = GetAuctionSellItemInfo()
+			if sellName2 and sellCount2 and sellCount2 >= stackSize then
+				local perStack = CalculateAuctionDeposit(durationIndex)
+				if perStack ~= nil then
+					local total = (perStack or 0) * numAuctions
+					self.depositLabel:SetText(format("%s %s", L["Deposit:"], TSMAPI:FormatTextMoney(total) or "0"))
+					return
+				end
+			end
+			if self._depositAttempts < 6 then
+				TSMAPI:CreateTimeDelay(timerBase..self._depositAttempts, 0.05, TryFetch)
+			else
+				-- Final attempt: if we have SOME of the item (partial stack) show deposit for that amount instead of blank.
+				if sellName2 and sellCount2 and sellCount2 > 0 then
+					if AuctionsStackSizeEntry and AuctionsStackSizeEntry:GetNumber() ~= sellCount2 then
+						AuctionsStackSizeEntry:SetNumber(sellCount2)
+					end
+					local perStack = CalculateAuctionDeposit(durationIndex)
+					if perStack ~= nil then
+						local total = (perStack or 0) * numAuctions * sellCount2 / stackSize -- scale if partial
+						self.depositLabel:SetText(format("%s %s", L["Deposit:"], TSMAPI:FormatTextMoney(total) or "0"))
+						return
+					end
+				end
+				self.depositLabel:SetText(format("%s %s", L["Deposit:"], TSMAPI.Design:GetInlineColor("inactive").."---|r"))
+			end
+		end
+		TryFetch()
+	end
+
+	-- Wrap relevant scripts (only stack size, number of auctions, duration) to update deposit.
+	local function Wrap(box, events, force)
+		for _, evt in ipairs(events) do
+			local orig = box:GetScript(evt)
+			box:SetScript(evt, function(...)
+				if orig then orig(... ) end
+				frame:UpdateDeposit(force)
+			end)
+		end
+	end
+	if frame.stackSizeInputBox then
+		Wrap(frame.stackSizeInputBox, {"OnEditFocusLost"}, true)
+	end
+	if frame.numAuctionsInputBox then
+		Wrap(frame.numAuctionsInputBox, {"OnEditFocusLost","OnTextChanged"}, false)
+	end
+	if frame.durationDropdown then
+		frame.durationDropdown:SetCallback("OnValueChanged", function(_, _, value)
+			TSM.db.profile.postDuration = value
+			frame:UpdateDeposit(false)
+		end)
+	end
 	
 	return frame
 end
